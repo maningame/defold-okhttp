@@ -1,0 +1,8 @@
+function init(self)
+	local url = "https://defold.com/"
+	local method = "GET"
+	
+	okhttp.request(url, method, function(self, m_url, m_headers, m_response, m_code) 
+		pprint(m_url, m_headers, m_response, m_code)
+	end)
+end
