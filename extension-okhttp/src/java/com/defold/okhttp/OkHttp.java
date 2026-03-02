@@ -21,13 +21,14 @@ class OkHttp {
     public static final String TAG = "extension_okhttp";
 
     // Передаём данные обратно в Дефолд
-    public static native void RequestCallback(String url, String headers, String body, int code, long cmdHandle);
+    public static native void RequestCallback(String url, String headers, String body, int code, String error, long cmdHandle);
 
     // Ответ
     public static class HttpResponse {
         public int code = 0;
         public String body = "";
         public String headers = "";
+        public String error = "";
     }
 
     // TODO: передача параметров из настроек плагина
@@ -81,9 +82,10 @@ class OkHttp {
             result.headers = headersJson.toString();
         } catch (Exception e) {
             Log.e(TAG, "HTTP request failed", e);
+            result.error = e.getMessage();
         }
 
-        RequestCallback(url, result.headers, result.body, result.code, commandPtr);
+        RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
     }
 
     public OkHttp() {

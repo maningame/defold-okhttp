@@ -122,11 +122,12 @@ static int OkHttp_Request(lua_State* L)
 extern "C" {
 #endif
 
-JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env, jobject, jstring url, jstring headers, jstring body, jint code, jlong cmdHandle)
+JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env, jobject, jstring url, jstring headers, jstring body, jint code, jstring error, jlong cmdHandle)
 {
     const char* c_url = env->GetStringUTFChars(url, 0);
     const char* c_headers = env->GetStringUTFChars(headers, 0);
     const char* c_body = env->GetStringUTFChars(body, 0);
+    const char* c_error = env->GetStringUTFChars(error, 0);
 
     OkHttpCommand* cmd = (OkHttpCommand*)cmdHandle;
 
@@ -134,10 +135,12 @@ JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env
     cmd->m_Url = strdup(c_url);
     cmd->m_Headers = strdup(c_headers);
     cmd->m_Response = strdup(c_body);
+    cmd->m_Error = strdup(c_error);
 
     env->ReleaseStringUTFChars(url, c_url);
     env->ReleaseStringUTFChars(headers, c_headers);
     env->ReleaseStringUTFChars(body, c_body);
+    env->ReleaseStringUTFChars(error, c_error);
 
     OkHttp_Queue_Push(&g_OkHttp.m_CommandQueue, cmd);
 }
@@ -164,15 +167,36 @@ static void HandleRequestResult(const OkHttpCommand* cmd)
         return;
     }
 
-    // const char* json = (const char*)cmd->m_Data;
-    // dmScript::JsonToLua(L, json, strlen(json)); // throws lua error if it fails
+    lua_newtable(L);
 
+    lua_pushstring(L, "url");
     lua_pushstring(L, (const char*)cmd->m_Url);
-    lua_pushstring(L, (const char*)cmd->m_Headers);
-    lua_pushstring(L, (const char*)cmd->m_Response);
-    lua_pushnumber(L, cmd->m_ResponseCode);
+    lua_rawset(L, -3);
 
-    dmScript::PCall(L, 5, 0);
+    lua_pushstring(L, "headers");
+
+    const char* headers_json = (const char*)cmd->m_Headers;
+    if (strlen(headers_json) > 0) {
+        dmScript::JsonToLua(L, headers_json, strlen(headers_json));
+    } else {
+        lua_newtable(L);
+    }
+
+    lua_rawset(L, -3);
+
+    lua_pushstring(L, "response");
+    lua_pushstring(L, (const char*)cmd->m_Response);
+    lua_rawset(L, -3);
+
+    lua_pushstring(L, "error");
+    lua_pushstring(L, (const char*)cmd->m_Error);
+    lua_rawset(L, -3);
+
+    lua_pushstring(L, "status");
+    lua_pushnumber(L, cmd->m_ResponseCode);
+    lua_rawset(L, -3);
+
+    dmScript::PCall(L, 2, 0);
 
     dmScript::TeardownCallback(cmd->m_Callback);
     dmScript::DestroyCallback(cmd->m_Callback);

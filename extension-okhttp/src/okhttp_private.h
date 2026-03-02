@@ -27,6 +27,7 @@ struct DM_ALIGNED(16) OkHttpCommand
     void*    	m_Url;
     void*    	m_Headers;
     void*    	m_Response;
+    void*    	m_Error;
 };
 
 struct OkHttpCommandQueue
