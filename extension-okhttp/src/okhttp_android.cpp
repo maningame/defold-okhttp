@@ -24,7 +24,6 @@ struct OkHttp
 
 static OkHttp g_OkHttp;
 
-// TODO: delete?
 static jobject LuaTableToHashMap(JNIEnv* env, lua_State* L, int index)
 {
     jclass hashMapClass = env->FindClass("java/util/HashMap");
@@ -299,29 +298,6 @@ static dmExtension::Result OnUpdateOkHttpExt(dmExtension::Params* params)
     return dmExtension::RESULT_OK;
 }
 
-// TODO: delete?
-static void OnEventOkHttpExt(dmExtension::Params* params, const dmExtension::Event* event)
-{
-    switch(event->m_Event)
-    {
-        case dmExtension::EVENT_ID_ACTIVATEAPP:
-            dmLogInfo("OnEventOkHttpExt - EVENT_ID_ACTIVATEAPP");
-            break;
-        case dmExtension::EVENT_ID_DEACTIVATEAPP:
-            dmLogInfo("OnEventOkHttpExt - EVENT_ID_DEACTIVATEAPP");
-            break;
-        case dmExtension::EVENT_ID_ICONIFYAPP:
-            dmLogInfo("OnEventOkHttpExt - EVENT_ID_ICONIFYAPP");
-            break;
-        case dmExtension::EVENT_ID_DEICONIFYAPP:
-            dmLogInfo("OnEventOkHttpExt - EVENT_ID_DEICONIFYAPP");
-            break;
-        default:
-            dmLogWarning("OnEventOkHttpExt - Unknown event id");
-            break;
-    }
-}
-
-DM_DECLARE_EXTENSION(OkHttpExt, LIB_NAME, AppInitializeOkHttpExt, AppFinalizeOkHttpExt, InitializeOkHttpExt, OnUpdateOkHttpExt, OnEventOkHttpExt, FinalizeOkHttpExt)
+DM_DECLARE_EXTENSION(OkHttpExt, LIB_NAME, AppInitializeOkHttpExt, AppFinalizeOkHttpExt, InitializeOkHttpExt, OnUpdateOkHttpExt, NULL, FinalizeOkHttpExt)
 
 #endif //DM_PLATFORM_ANDROID
