@@ -35,14 +35,7 @@ class OkHttp {
         public String error = "";
     }
 
-    // TODO: передача параметров из настроек плагина
-    private static final OkHttpClient httpClient = new OkHttpClient.Builder()
-        .protocols(List.of(Protocol.HTTP_2, Protocol.HTTP_1_1))
-        .connectionPool(new ConnectionPool(5, 5, TimeUnit.MINUTES))
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .addInterceptor(new HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BODY))
-        .build();
+    private final OkHttpClient httpClient;
 
     // Http-запрос
     public void HttpRequest(String url, String method, Map<String, String> headers, String body, final long commandPtr) {
@@ -104,7 +97,26 @@ class OkHttp {
         });
     }
 
-    public OkHttp() {
+    public OkHttp(long readTimeout,
+                  long connectTimeout,
+                  int maxIdleConnections,
+                  long keepAliveDuration,
+                  boolean isLog) {
 
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+            .protocols(List.of(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .connectionPool(new ConnectionPool(maxIdleConnections,
+                                             keepAliveDuration,
+                                             TimeUnit.MINUTES))
+            .connectTimeout(connectTimeout, TimeUnit.SECONDS)
+            .readTimeout(readTimeout, TimeUnit.SECONDS);
+
+        if (isLog) {
+            HttpLoggingInterceptor loggingInterceptor = new HttpLoggingInterceptor();
+            loggingInterceptor.setLevel(HttpLoggingInterceptor.Level.BODY);
+            builder.addInterceptor(loggingInterceptor);
+        }
+
+        this.httpClient = builder.build();
     }
 }

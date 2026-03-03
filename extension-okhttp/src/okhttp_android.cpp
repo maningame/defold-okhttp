@@ -264,8 +264,21 @@ static dmExtension::Result InitializeOkHttpExt(dmExtension::Params* params)
 
     g_OkHttp.m_HttpRequest = env->GetMethodID(okhttp_class, "HttpRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;J)V");
 
-    jmethodID jni_constructor = env->GetMethodID(okhttp_class, "<init>", "()V");
-    g_OkHttp.m_OkHttp = env->NewGlobalRef(env->NewObject(okhttp_class, jni_constructor, threadAttacher.GetActivity()->clazz));
+    jmethodID jni_constructor = env->GetMethodID(okhttp_class, "<init>", "(JJIJZ)V");
+
+    jint maxIdleConnections = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.max_idle_connections", 5);
+    jlong keepAliveDuration = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.keep_alive_duration", 5);
+    jlong connectTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.connect_timeout", 10);
+    jlong readTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.read_timeout", 10);
+    jboolean isLog = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.log", 1) == 1;
+
+    g_OkHttp.m_OkHttp = env->NewGlobalRef(env->NewObject(okhttp_class, jni_constructor,
+        readTimeout,
+        connectTimeout,
+        maxIdleConnections,
+        keepAliveDuration,
+        isLog
+    ));
 
     LuaInit(params->m_L);
     dmLogInfo("Registered %s Extension", MODULE_NAME);
