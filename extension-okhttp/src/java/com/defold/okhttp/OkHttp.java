@@ -4,6 +4,8 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
@@ -12,7 +14,9 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import okhttp3.Headers;
 import okhttp3.ConnectionPool;
+import okhttp3.logging.HttpLoggingInterceptor;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -37,8 +41,8 @@ class OkHttp {
         .connectionPool(new ConnectionPool(5, 5, TimeUnit.MINUTES))
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .addInterceptor(new HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BODY))
         .build();
-
 
     // Http-запрос
     public void HttpRequest(String url, String method, Map<String, String> headers, String body, final long commandPtr) {
@@ -68,24 +72,36 @@ class OkHttp {
 
         Request request = requestBuilder.build();
 
-        try (Response response = httpClient.newCall(request).execute()) {
-            result.body = (response.body() != null) ? response.body().string() : "";
-            result.code = response.code();
-
-            Headers responseHeaders = response.headers();
-            JSONObject headersJson = new JSONObject();
-
-            for (int i = 0; i < responseHeaders.size(); i++) {
-                headersJson.put(responseHeaders.name(i), responseHeaders.value(i));
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                Log.e(TAG, "HTTP request failed", e);
+                result.error = e.getMessage();
             }
 
-            result.headers = headersJson.toString();
-        } catch (Exception e) {
-            Log.e(TAG, "HTTP request failed", e);
-            result.error = e.getMessage();
-        }
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try {
+                    result.body = (response.body() != null) ? response.body().string() : "";
+                    result.code = response.code();
 
-        RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
+                    Headers responseHeaders = response.headers();
+                    JSONObject headersJson = new JSONObject();
+
+                    for (int i = 0; i < responseHeaders.size(); i++) {
+                        headersJson.put(responseHeaders.name(i), responseHeaders.value(i));
+                    }
+
+                    result.headers = headersJson.toString();
+                } catch (Exception e) {
+                    Log.e(TAG, "HTTP response processing failed", e);
+                    result.error = e.getMessage();
+                } finally {
+                    RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
+                    response.close();
+                }
+            }
+        });
     }
 
     public OkHttp() {
