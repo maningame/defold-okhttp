@@ -16,3 +16,6 @@ builtins
 
 manifest.private.der
 manifest.public.der
+
+/dist
+debug.keystore*
