@@ -29,14 +29,13 @@ void OkHttp_Queue_Flush(OkHttpCommandQueue* queue, OkHttpCommandFn fn, void* ctx
 {
     assert(fn != 0);
 
-    if (queue->m_Commands.Empty())
-    {
-        return;
-    }
-
     dmArray<OkHttpCommand> tmp;
     {
         DM_MUTEX_SCOPED_LOCK(queue->m_Mutex);
+        if (queue->m_Commands.Empty())
+        {
+            return;
+        }
         tmp.Swap(queue->m_Commands);
     }
 

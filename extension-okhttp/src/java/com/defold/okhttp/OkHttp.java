@@ -69,7 +69,8 @@ class OkHttp {
             @Override
             public void onFailure(Call call, IOException e) {
                 Log.e(TAG, "HTTP request failed", e);
-                result.error = e.getMessage();
+                result.error = (e.getMessage() != null) ? e.getMessage() : e.getClass().getName();
+                RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
             }
 
             @Override

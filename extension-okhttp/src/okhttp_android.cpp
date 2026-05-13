@@ -30,20 +30,28 @@ static jobject LuaTableToHashMap(JNIEnv* env, lua_State* L, int index)
     jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
     jobject hashMap = env->NewObject(hashMapClass, hashMapInit);
 
-    jclass mapClass = env->FindClass("java/util/Map");
     jmethodID putMethod = env->GetMethodID(hashMapClass, "put",
         "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+
+    env->DeleteLocalRef(hashMapClass);
 
     lua_pushnil(L);
 
     while (lua_next(L, index) != 0) {
-        jstring jkey = env->NewStringUTF(lua_tostring(L, -2));
-        jstring jvalue = env->NewStringUTF(lua_tostring(L, -1));
+        // lua_tostring returns NULL for non-string/non-number types; skip those entries
+        const char* key = lua_tostring(L, -2);
+        const char* value = lua_tostring(L, -1);
 
-        env->CallObjectMethod(hashMap, putMethod, jkey, jvalue);
+        if (key != NULL && value != NULL) {
+            jstring jkey = env->NewStringUTF(key);
+            jstring jvalue = env->NewStringUTF(value);
 
-        env->DeleteLocalRef(jkey);
-        env->DeleteLocalRef(jvalue);
+            env->CallObjectMethod(hashMap, putMethod, jkey, jvalue);
+
+            env->DeleteLocalRef(jkey);
+            env->DeleteLocalRef(jvalue);
+        }
+
         lua_pop(L, 1);
     }
 
@@ -142,6 +150,7 @@ JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env
     env->ReleaseStringUTFChars(error, c_error);
 
     OkHttp_Queue_Push(&g_OkHttp.m_CommandQueue, cmd);
+    delete cmd;
 }
 
 #ifdef __cplusplus
@@ -162,6 +171,7 @@ static void HandleRequestResult(const OkHttpCommand* cmd)
     if (!dmScript::SetupCallback(cmd->m_Callback))
     {
         dmLogWarning("Setup failed, stack now: %d", lua_gettop(L));
+        dmScript::DestroyCallback(cmd->m_Callback);
         assert(top == lua_gettop(L));
         return;
     }
@@ -245,6 +255,10 @@ static void OkHttp_OnCommand(OkHttpCommand* cmd, void*)
 
     if (cmd->m_Response) {
         free(cmd->m_Response);
+    }
+
+    if (cmd->m_Error) {
+        free(cmd->m_Error);
     }
 }
 
