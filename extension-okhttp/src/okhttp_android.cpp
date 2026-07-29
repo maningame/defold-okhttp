@@ -11,8 +11,9 @@
 struct OkHttp
 {
     OkHttp()
+    : m_OkHttp(0)
+    , m_HttpRequest(0)
     {
-        memset(this, 0, sizeof(*this));
     }
 
     jobject m_OkHttp;
@@ -58,6 +59,54 @@ static jobject LuaTableToHashMap(JNIEnv* env, lua_State* L, int index)
     return hashMap;
 }
 
+static const char* SafeString(void* str)
+{
+    return str != 0 ? (const char*)str : "";
+}
+
+static char* CopyJavaString(JNIEnv* env, jstring str)
+{
+    if (str == 0)
+    {
+        return strdup("");
+    }
+
+    const char* c_str = env->GetStringUTFChars(str, 0);
+
+    if (c_str == 0)
+    {
+        return strdup("");
+    }
+
+    char* result = strdup(c_str);
+    env->ReleaseStringUTFChars(str, c_str);
+
+    return result;
+}
+
+static void FreeCommandData(OkHttpCommand* cmd)
+{
+    if (cmd->m_Data) {
+        free(cmd->m_Data);
+    }
+
+    if (cmd->m_Url) {
+        free(cmd->m_Url);
+    }
+
+    if (cmd->m_Headers) {
+        free(cmd->m_Headers);
+    }
+
+    if (cmd->m_Response) {
+        free(cmd->m_Response);
+    }
+
+    if (cmd->m_Error) {
+        free(cmd->m_Error);
+    }
+}
+
 static int OkHttp_Request(lua_State* L)
 {
     DM_LUA_STACK_CHECK(L, 0);
@@ -84,6 +133,11 @@ static int OkHttp_Request(lua_State* L)
         return luaL_error(L, "Expected function for callback, got %s", luaL_typename(L, 3));
     }
 
+    if (g_OkHttp.m_OkHttp == 0)
+    {
+        return luaL_error(L, "The okhttp extension is not initialized");
+    }
+
     dmAndroid::ThreadAttacher threadAttacher;
     JNIEnv* env = threadAttacher.GetEnv();
 
@@ -107,13 +161,43 @@ static int OkHttp_Request(lua_State* L)
         jbody = env->NewStringUTF(luaL_checkstring(L, 5));
     }
 
-    // Callback
-    OkHttpCommand* cmd = new OkHttpCommand;
-    cmd->m_Callback = dmScript::CreateCallback(L, 3);
-    cmd->m_Command = OKHTTP_REQUEST_RESULT;
+    // Callback. The queue owns it and java only gets an id, so a duplicated or a
+    // late result can never reach a freed callback
+    dmScript::LuaCallbackInfo* callback = dmScript::CreateCallback(L, 3);
+    uint64_t request_id = OkHttp_Queue_AddRequest(&g_OkHttp.m_CommandQueue, callback);
+
+    if (request_id == 0)
+    {
+        dmScript::DestroyCallback(callback);
+
+        env->DeleteLocalRef(jurl);
+        env->DeleteLocalRef(jmethod);
+
+        if (jheaders) env->DeleteLocalRef(jheaders);
+        if (jbody) env->DeleteLocalRef(jbody);
+
+        dmLogWarning("The okhttp queue is closed, the request was not sent: %s", url);
+
+        return 0;
+    }
 
     // Call native request
-    env->CallVoidMethod(g_OkHttp.m_OkHttp, g_OkHttp.m_HttpRequest, jurl, jmethod, jheaders, jbody, (jlong)cmd);
+    env->CallVoidMethod(g_OkHttp.m_OkHttp, g_OkHttp.m_HttpRequest, jurl, jmethod, jheaders, jbody, (jlong)request_id);
+
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+
+        dmScript::LuaCallbackInfo* pending = OkHttp_Queue_TakeRequest(&g_OkHttp.m_CommandQueue, request_id);
+
+        if (pending)
+        {
+            dmScript::DestroyCallback(pending);
+        }
+
+        dmLogError("Failed to send the request, the callback will not be called: %s", url);
+    }
 
     // Cleanup
     env->DeleteLocalRef(jurl);
@@ -129,28 +213,25 @@ static int OkHttp_Request(lua_State* L)
 extern "C" {
 #endif
 
-JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env, jobject, jstring url, jstring headers, jstring body, jint code, jstring error, jlong cmdHandle)
+JNIEXPORT void JNICALL Java_com_defold_okhttp_OkHttp_RequestCallback(JNIEnv* env, jclass, jstring url, jstring headers, jstring body, jint code, jstring error, jlong requestId)
 {
-    const char* c_url = env->GetStringUTFChars(url, 0);
-    const char* c_headers = env->GetStringUTFChars(headers, 0);
-    const char* c_body = env->GetStringUTFChars(body, 0);
-    const char* c_error = env->GetStringUTFChars(error, 0);
+    OkHttpCommand cmd;
 
-    OkHttpCommand* cmd = (OkHttpCommand*)cmdHandle;
+    cmd.m_Command = OKHTTP_REQUEST_RESULT;
+    cmd.m_ResponseCode = code;
+    cmd.m_Url = CopyJavaString(env, url);
+    cmd.m_Headers = CopyJavaString(env, headers);
+    cmd.m_Response = CopyJavaString(env, body);
+    cmd.m_Error = CopyJavaString(env, error);
 
-    cmd->m_ResponseCode = code;
-    cmd->m_Url = strdup(c_url);
-    cmd->m_Headers = strdup(c_headers);
-    cmd->m_Response = strdup(c_body);
-    cmd->m_Error = strdup(c_error);
-
-    env->ReleaseStringUTFChars(url, c_url);
-    env->ReleaseStringUTFChars(headers, c_headers);
-    env->ReleaseStringUTFChars(body, c_body);
-    env->ReleaseStringUTFChars(error, c_error);
-
-    OkHttp_Queue_Push(&g_OkHttp.m_CommandQueue, cmd);
-    delete cmd;
+    // The queue resolves the id into the stored callback. An unknown id means the
+    // result was already delivered, or the lua state that owned the callback is
+    // gone (sys.reboot, shutdown), so the result is dropped
+    if (!OkHttp_Queue_PushResult(&g_OkHttp.m_CommandQueue, (uint64_t)requestId, &cmd))
+    {
+        dmLogWarning("Dropped a result of an unknown request: %s", SafeString(cmd.m_Url));
+        FreeCommandData(&cmd);
+    }
 }
 
 #ifdef __cplusplus
@@ -162,6 +243,13 @@ static void HandleRequestResult(const OkHttpCommand* cmd)
     if (cmd->m_Callback == 0)
     {
         dmLogWarning("Received request result but no listener was set!");
+        return;
+    }
+
+    if (!dmScript::IsCallbackValid(cmd->m_Callback))
+    {
+        dmLogWarning("Received request result but the callback is no longer valid");
+        dmScript::DestroyCallback(cmd->m_Callback);
         return;
     }
 
@@ -179,12 +267,12 @@ static void HandleRequestResult(const OkHttpCommand* cmd)
     lua_newtable(L);
 
     lua_pushstring(L, "url");
-    lua_pushstring(L, (const char*)cmd->m_Url);
+    lua_pushstring(L, SafeString(cmd->m_Url));
     lua_rawset(L, -3);
 
     lua_pushstring(L, "headers");
 
-    const char* headers_json = (const char*)cmd->m_Headers;
+    const char* headers_json = SafeString(cmd->m_Headers);
     if (strlen(headers_json) > 0) {
         dmScript::JsonToLua(L, headers_json, strlen(headers_json));
     } else {
@@ -194,11 +282,11 @@ static void HandleRequestResult(const OkHttpCommand* cmd)
     lua_rawset(L, -3);
 
     lua_pushstring(L, "response");
-    lua_pushstring(L, (const char*)cmd->m_Response);
+    lua_pushstring(L, SafeString(cmd->m_Response));
     lua_rawset(L, -3);
 
     lua_pushstring(L, "error");
-    lua_pushstring(L, (const char*)cmd->m_Error);
+    lua_pushstring(L, SafeString(cmd->m_Error));
     lua_rawset(L, -3);
 
     lua_pushstring(L, "status");
@@ -241,25 +329,26 @@ static void OkHttp_OnCommand(OkHttpCommand* cmd, void*)
         assert(false);
     }
 
-    if (cmd->m_Data) {
-        free(cmd->m_Data);
+    FreeCommandData(cmd);
+}
+
+// Used while the lua state is still alive (extension finalize)
+static void OkHttp_OnDiscard(OkHttpCommand* cmd, void*)
+{
+    if (cmd->m_Callback)
+    {
+        dmScript::DestroyCallback(cmd->m_Callback);
     }
 
-    if (cmd->m_Url) {
-        free(cmd->m_Url);
-    }
+    FreeCommandData(cmd);
+}
 
-    if (cmd->m_Headers) {
-        free(cmd->m_Headers);
-    }
-
-    if (cmd->m_Response) {
-        free(cmd->m_Response);
-    }
-
-    if (cmd->m_Error) {
-        free(cmd->m_Error);
-    }
+// Used when the owning lua state is already gone (extension initialize after a
+// previous instance died): the callback cannot be unregistered anymore, only the
+// payload is released
+static void OkHttp_OnDiscardStale(OkHttpCommand* cmd, void*)
+{
+    FreeCommandData(cmd);
 }
 
 static dmExtension::Result AppInitializeOkHttpExt(dmExtension::AppParams* params)
@@ -269,12 +358,22 @@ static dmExtension::Result AppInitializeOkHttpExt(dmExtension::AppParams* params
 
 static dmExtension::Result InitializeOkHttpExt(dmExtension::Params* params)
 {
+    // The queue lives for the whole process, so anything left over from a previous
+    // lua state (sys.reboot, engine restart) is dropped before it can be flushed
+    // into the new one
+    OkHttp_Queue_Destroy(&g_OkHttp.m_CommandQueue, OkHttp_OnDiscardStale, 0);
     OkHttp_Queue_Create(&g_OkHttp.m_CommandQueue);
 
     dmAndroid::ThreadAttacher threadAttacher;
     JNIEnv* env = threadAttacher.GetEnv();
 
     jclass okhttp_class = dmAndroid::LoadClass(env, "com.defold.okhttp.OkHttp");
+
+    if (okhttp_class == 0)
+    {
+        dmLogError("Failed to load the com.defold.okhttp.OkHttp class");
+        return dmExtension::RESULT_INIT_ERROR;
+    }
 
     g_OkHttp.m_HttpRequest = env->GetMethodID(okhttp_class, "HttpRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;J)V");
 
@@ -307,14 +406,20 @@ static dmExtension::Result AppFinalizeOkHttpExt(dmExtension::AppParams* params)
 
 static dmExtension::Result FinalizeOkHttpExt(dmExtension::Params* params)
 {
-    OkHttp_Queue_Destroy(&g_OkHttp.m_CommandQueue);
+    // Closes the queue and releases every callback that will never be delivered,
+    // while the lua state they belong to is still alive
+    OkHttp_Queue_Destroy(&g_OkHttp.m_CommandQueue, OkHttp_OnDiscard, 0);
 
     dmAndroid::ThreadAttacher threadAttacher;
     JNIEnv* env = threadAttacher.GetEnv();
 
-    env->DeleteGlobalRef(g_OkHttp.m_OkHttp);
+    if (g_OkHttp.m_OkHttp)
+    {
+        env->DeleteGlobalRef(g_OkHttp.m_OkHttp);
+    }
 
     g_OkHttp.m_OkHttp = NULL;
+    g_OkHttp.m_HttpRequest = NULL;
 
     return dmExtension::RESULT_OK;
 }

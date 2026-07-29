@@ -20,12 +20,13 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 class OkHttp {
     public static final String TAG = "extension_okhttp";
 
     // Передаём данные обратно в Дефолд
-    public static native void RequestCallback(String url, String headers, String body, int code, String error, long cmdHandle);
+    public static native void RequestCallback(String url, String headers, String body, int code, String error, long requestId);
 
     // Ответ
     public static class HttpResponse {
@@ -37,9 +38,27 @@ class OkHttp {
 
     private final OkHttpClient httpClient;
 
+    private static String errorMessage(Throwable e) {
+        String message = e.getMessage();
+
+        return (message != null) ? message : e.getClass().getName();
+    }
+
+    // Результат запроса уходит в Дефолд ровно один раз: повторная доставка
+    // обращалась бы к уже освобождённому коллбэку
+    private static void deliver(HttpResponse result, String url, long requestId, AtomicBoolean isDelivered) {
+        if (!isDelivered.compareAndSet(false, true)) {
+            Log.w(TAG, "Duplicate result ignored: " + url);
+            return;
+        }
+
+        RequestCallback(url, result.headers, result.body, result.code, result.error, requestId);
+    }
+
     // Http-запрос
-    public void HttpRequest(String url, String method, Map<String, String> headers, String body, final long commandPtr) {
+    public void HttpRequest(String url, String method, Map<String, String> headers, String body, final long requestId) {
         HttpResponse result = new HttpResponse();
+        final AtomicBoolean isDelivered = new AtomicBoolean(false);
         Request.Builder requestBuilder = new Request.Builder()
             .url(url);
 
@@ -69,8 +88,8 @@ class OkHttp {
             @Override
             public void onFailure(Call call, IOException e) {
                 Log.e(TAG, "HTTP request failed", e);
-                result.error = (e.getMessage() != null) ? e.getMessage() : e.getClass().getName();
-                RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
+                result.error = errorMessage(e);
+                deliver(result, url, requestId, isDelivered);
             }
 
             @Override
@@ -89,9 +108,9 @@ class OkHttp {
                     result.headers = headersJson.toString();
                 } catch (Exception e) {
                     Log.e(TAG, "HTTP response processing failed", e);
-                    result.error = e.getMessage();
+                    result.error = errorMessage(e);
                 } finally {
-                    RequestCallback(url, result.headers, result.body, result.code, result.error, commandPtr);
+                    deliver(result, url, requestId, isDelivered);
                     response.close();
                 }
             }
