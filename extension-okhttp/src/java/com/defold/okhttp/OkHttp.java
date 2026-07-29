@@ -17,7 +17,7 @@ import okhttp3.ConnectionPool;
 import okhttp3.logging.HttpLoggingInterceptor;
 
 import java.io.IOException;
-import java.util.List;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -124,7 +124,8 @@ class OkHttp {
                   boolean isLog) {
 
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
-            .protocols(List.of(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            // Arrays.asList, а не List.of: java.util.List.of есть только с API 30
+            .protocols(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1))
             .connectionPool(new ConnectionPool(maxIdleConnections,
                                              keepAliveDuration,
                                              TimeUnit.MINUTES))

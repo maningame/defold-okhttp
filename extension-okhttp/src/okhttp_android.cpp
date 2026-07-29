@@ -25,6 +25,21 @@ struct OkHttp
 
 static OkHttp g_OkHttp;
 
+// Returns true if a java exception was pending. It is always cleared: any
+// following jni call with a pending exception aborts the process
+static bool CheckJavaException(JNIEnv* env)
+{
+    if (!env->ExceptionCheck())
+    {
+        return false;
+    }
+
+    env->ExceptionDescribe();
+    env->ExceptionClear();
+
+    return true;
+}
+
 static jobject LuaTableToHashMap(JNIEnv* env, lua_State* L, int index)
 {
     jclass hashMapClass = env->FindClass("java/util/HashMap");
@@ -39,18 +54,22 @@ static jobject LuaTableToHashMap(JNIEnv* env, lua_State* L, int index)
     lua_pushnil(L);
 
     while (lua_next(L, index) != 0) {
-        // lua_tostring returns NULL for non-string/non-number types; skip those entries
-        const char* key = lua_tostring(L, -2);
-        const char* value = lua_tostring(L, -1);
+        // lua_tostring must never be called on the key: converting a number key in
+        // place breaks the lua_next traversal. Non string keys are skipped.
+        // lua_tostring returns NULL for non-string/non-number values
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            const char* key = lua_tostring(L, -2);
+            const char* value = lua_tostring(L, -1);
 
-        if (key != NULL && value != NULL) {
-            jstring jkey = env->NewStringUTF(key);
-            jstring jvalue = env->NewStringUTF(value);
+            if (value != NULL) {
+                jstring jkey = env->NewStringUTF(key);
+                jstring jvalue = env->NewStringUTF(value);
 
-            env->CallObjectMethod(hashMap, putMethod, jkey, jvalue);
+                env->CallObjectMethod(hashMap, putMethod, jkey, jvalue);
 
-            env->DeleteLocalRef(jkey);
-            env->DeleteLocalRef(jvalue);
+                if (jkey) env->DeleteLocalRef(jkey);
+                if (jvalue) env->DeleteLocalRef(jvalue);
+            }
         }
 
         lua_pop(L, 1);
@@ -75,6 +94,7 @@ static char* CopyJavaString(JNIEnv* env, jstring str)
 
     if (c_str == 0)
     {
+        CheckJavaException(env);
         return strdup("");
     }
 
@@ -104,6 +124,32 @@ static void FreeCommandData(OkHttpCommand* cmd)
 
     if (cmd->m_Error) {
         free(cmd->m_Error);
+    }
+}
+
+static void DeleteRequestRefs(JNIEnv* env, jstring jurl, jstring jmethod, jobject jheaders, jstring jbody)
+{
+    if (jurl) env->DeleteLocalRef(jurl);
+    if (jmethod) env->DeleteLocalRef(jmethod);
+    if (jheaders) env->DeleteLocalRef(jheaders);
+    if (jbody) env->DeleteLocalRef(jbody);
+}
+
+// Reports a failure the same way a connection failure does (status 0 + error), so
+// the lua side gets its callback instead of waiting for a result that never comes
+static void PushErrorResult(uint64_t request_id, const char* url, const char* error)
+{
+    OkHttpCommand cmd;
+
+    cmd.m_Command = OKHTTP_REQUEST_RESULT;
+    cmd.m_Url = strdup(url);
+    cmd.m_Headers = strdup("");
+    cmd.m_Response = strdup("");
+    cmd.m_Error = strdup(error);
+
+    if (!OkHttp_Queue_PushResult(&g_OkHttp.m_CommandQueue, request_id, &cmd))
+    {
+        FreeCommandData(&cmd);
     }
 }
 
@@ -161,6 +207,15 @@ static int OkHttp_Request(lua_State* L)
         jbody = env->NewStringUTF(luaL_checkstring(L, 5));
     }
 
+    // The arguments are converted before the callback is created, so a failure
+    // here needs no cleanup besides the local refs
+    if (CheckJavaException(env) || jurl == 0 || jmethod == 0)
+    {
+        DeleteRequestRefs(env, jurl, jmethod, jheaders, jbody);
+
+        return luaL_error(L, "Failed to convert the request arguments");
+    }
+
     // Callback. The queue owns it and java only gets an id, so a duplicated or a
     // late result can never reach a freed callback
     dmScript::LuaCallbackInfo* callback = dmScript::CreateCallback(L, 3);
@@ -169,12 +224,7 @@ static int OkHttp_Request(lua_State* L)
     if (request_id == 0)
     {
         dmScript::DestroyCallback(callback);
-
-        env->DeleteLocalRef(jurl);
-        env->DeleteLocalRef(jmethod);
-
-        if (jheaders) env->DeleteLocalRef(jheaders);
-        if (jbody) env->DeleteLocalRef(jbody);
+        DeleteRequestRefs(env, jurl, jmethod, jheaders, jbody);
 
         dmLogWarning("The okhttp queue is closed, the request was not sent: %s", url);
 
@@ -184,27 +234,13 @@ static int OkHttp_Request(lua_State* L)
     // Call native request
     env->CallVoidMethod(g_OkHttp.m_OkHttp, g_OkHttp.m_HttpRequest, jurl, jmethod, jheaders, jbody, (jlong)request_id);
 
-    if (env->ExceptionCheck())
+    if (CheckJavaException(env))
     {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-
-        dmScript::LuaCallbackInfo* pending = OkHttp_Queue_TakeRequest(&g_OkHttp.m_CommandQueue, request_id);
-
-        if (pending)
-        {
-            dmScript::DestroyCallback(pending);
-        }
-
-        dmLogError("Failed to send the request, the callback will not be called: %s", url);
+        dmLogError("Failed to send the request: %s", url);
+        PushErrorResult(request_id, url, "Failed to send the request");
     }
 
-    // Cleanup
-    env->DeleteLocalRef(jurl);
-    env->DeleteLocalRef(jmethod);
-
-    if (jheaders) env->DeleteLocalRef(jheaders);
-    if (jbody) env->DeleteLocalRef(jbody);
+    DeleteRequestRefs(env, jurl, jmethod, jheaders, jbody);
 
     return 0;
 }
@@ -356,6 +392,63 @@ static dmExtension::Result AppInitializeOkHttpExt(dmExtension::AppParams* params
     return dmExtension::RESULT_OK;
 }
 
+// Every jni result is checked: a null jmethodID or a pending exception would abort
+// the process on the next jni call
+static bool InitializeJava(dmExtension::Params* params, JNIEnv* env)
+{
+    jclass okhttp_class = dmAndroid::LoadClass(env, "com.defold.okhttp.OkHttp");
+
+    if (CheckJavaException(env) || okhttp_class == 0)
+    {
+        dmLogError("Failed to load the com.defold.okhttp.OkHttp class");
+
+        return false;
+    }
+
+    jmethodID http_request = env->GetMethodID(okhttp_class, "HttpRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;J)V");
+    jmethodID jni_constructor = env->GetMethodID(okhttp_class, "<init>", "(JJIJZ)V");
+
+    if (CheckJavaException(env) || http_request == 0 || jni_constructor == 0)
+    {
+        dmLogError("Failed to find the com.defold.okhttp.OkHttp methods");
+        env->DeleteLocalRef(okhttp_class);
+
+        return false;
+    }
+
+    jint maxIdleConnections = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.max_idle_connections", 5);
+    jlong keepAliveDuration = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.keep_alive_duration", 5);
+    jlong connectTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.connect_timeout", 10);
+    jlong readTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.read_timeout", 10);
+    jboolean isLog = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.log", 1) == 1;
+
+    jobject okhttp = env->NewObject(okhttp_class, jni_constructor,
+        readTimeout,
+        connectTimeout,
+        maxIdleConnections,
+        keepAliveDuration,
+        isLog
+    );
+
+    bool is_failed = CheckJavaException(env) || okhttp == 0;
+
+    env->DeleteLocalRef(okhttp_class);
+
+    if (is_failed)
+    {
+        dmLogError("Failed to create the com.defold.okhttp.OkHttp instance");
+
+        return false;
+    }
+
+    g_OkHttp.m_HttpRequest = http_request;
+    g_OkHttp.m_OkHttp = env->NewGlobalRef(okhttp);
+
+    env->DeleteLocalRef(okhttp);
+
+    return g_OkHttp.m_OkHttp != 0;
+}
+
 static dmExtension::Result InitializeOkHttpExt(dmExtension::Params* params)
 {
     // The queue lives for the whole process, so anything left over from a previous
@@ -364,36 +457,23 @@ static dmExtension::Result InitializeOkHttpExt(dmExtension::Params* params)
     OkHttp_Queue_Destroy(&g_OkHttp.m_CommandQueue, OkHttp_OnDiscardStale, 0);
     OkHttp_Queue_Create(&g_OkHttp.m_CommandQueue);
 
+    // Registered even when the java side is unavailable: okhttp.request then raises
+    // a proper lua error instead of indexing a nil global
+    LuaInit(params->m_L);
+
     dmAndroid::ThreadAttacher threadAttacher;
     JNIEnv* env = threadAttacher.GetEnv();
 
-    jclass okhttp_class = dmAndroid::LoadClass(env, "com.defold.okhttp.OkHttp");
-
-    if (okhttp_class == 0)
+    if (!InitializeJava(params, env))
     {
-        dmLogError("Failed to load the com.defold.okhttp.OkHttp class");
-        return dmExtension::RESULT_INIT_ERROR;
+        g_OkHttp.m_OkHttp = NULL;
+        g_OkHttp.m_HttpRequest = NULL;
+
+        dmLogError("The %s extension is registered but not available", MODULE_NAME);
+
+        return dmExtension::RESULT_OK;
     }
 
-    g_OkHttp.m_HttpRequest = env->GetMethodID(okhttp_class, "HttpRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;J)V");
-
-    jmethodID jni_constructor = env->GetMethodID(okhttp_class, "<init>", "(JJIJZ)V");
-
-    jint maxIdleConnections = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.max_idle_connections", 5);
-    jlong keepAliveDuration = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.keep_alive_duration", 5);
-    jlong connectTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.connect_timeout", 10);
-    jlong readTimeout = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.read_timeout", 10);
-    jboolean isLog = dmConfigFile::GetInt(params->m_ConfigFile, "okhttp.log", 1) == 1;
-
-    g_OkHttp.m_OkHttp = env->NewGlobalRef(env->NewObject(okhttp_class, jni_constructor,
-        readTimeout,
-        connectTimeout,
-        maxIdleConnections,
-        keepAliveDuration,
-        isLog
-    ));
-
-    LuaInit(params->m_L);
     dmLogInfo("Registered %s Extension", MODULE_NAME);
 
     return dmExtension::RESULT_OK;
